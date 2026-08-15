@@ -1,0 +1,18 @@
+# Example systemd unit — reference only. install.sh generates the real one
+# for your prefix, user, and port; you should not need to copy this by hand.
+# If your media lives on a removable mount, add a RequiresMountsFor= line
+# for it under [Unit] as a hardening measure.
+[Unit]
+Description=seinn media agent (listings + range streaming + delete)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=media
+ExecStart=/usr/bin/python3 /opt/seinn/seinn_agent.py --config /opt/seinn/seinn-agent.toml
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

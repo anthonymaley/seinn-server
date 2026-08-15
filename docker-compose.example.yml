@@ -1,0 +1,40 @@
+# seinn-agent — example compose file. Copy beside the Dockerfile (or point
+# `build:` at the server/ directory of an unpacked release tarball), edit the
+# volumes and ROOTS, then: docker compose up -d
+services:
+  seinn:
+    build: .
+    image: seinn-agent:local        # local tag only — no registry (pending
+                                    # open-source decision; do not push)
+    ports:
+      - "8378:8378"
+    environment:
+      # Used ONLY on first boot to generate /config/seinn-agent.toml.
+      # Once a config exists it wins, and ROOTS is ignored — edit the TOML.
+      ROOTS: "movies=/media/movies,tv=/media/tv"
+      # Run as the host user that owns your media, so reads — and delete,
+      # if you enable it — act as that user:  id -u / id -g
+      PUID: "1000"
+      PGID: "1000"
+    volumes:
+      # Config + watched-history db + thumbnail cache. Persist this or a
+      # recreate regenerates the token and loses watched history.
+      - ./seinn-config:/config
+      # Media. :ro is the safe default — playback and browsing need only
+      # read. Drop :ro on a share (and set delete_enabled = true in the
+      # config) to allow delete-from-the-couch on it.
+      - /srv/media/movies:/media/movies:ro
+      - /srv/media/tv:/media/tv:ro
+    # VAAPI hardware encoding — needed only for
+    #   docker exec seinn python3 /app/seinn_convert.py /media/tv --apply
+    # never for playback. Uncomment the device, and add the HOST's render
+    # group gid (names don't cross the container boundary):
+    #   getent group render   -> render:x:992:  -> use "992"
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - "992"
+    restart: unless-stopped
+    # Liveness comes from the image's HEALTHCHECK (python urllib against
+    # http://127.0.0.1:8378/api/roots — an open read, no token needed).
+    # Override here only if you changed the port inside the config.

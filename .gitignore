@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+dist/
+.DS_Store
+docker-compose.yml
+seinn-config/

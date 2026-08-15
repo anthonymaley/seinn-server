@@ -1,0 +1,26 @@
+# Copy to seinn-agent.toml (install.sh does this for you and generates a
+# token). The live config on your server is the one that runs; this file
+# is documentation.
+port = 8378
+bind = "0.0.0.0"
+delete_enabled = false   # safe default for a stranger's first boot; flip to true when ready
+hide_dotfiles = true     # corpus carries AppleDouble ._* junk over SMB
+thumbs_enabled = true
+cache_dir = "/var/tmp/seinn-thumbs"
+
+# Interim auth until Krutho credentials land. Required on state-changing routes
+# (DELETE today, config-write when it exists); reads stay open on the LAN.
+# The real value lives ONLY in the deployed /opt/seinn/seinn-agent.toml — never
+# commit it here. Generate with: python3 -c "import secrets;print(secrets.token_urlsafe(32))"
+# Give it to the app once: devicectl ... process launch <bundle> --token <value>
+auth_token = ""
+
+# Watched-state database (sqlite, created on first write).
+state_db = "/opt/seinn/progress.db"
+
+# EVERY top-level key must sit ABOVE [roots]. Appended below, TOML reads it as a
+# share — which is how the auth token briefly became a publicly-listed root.
+[roots]
+# Add a location by adding a line here, then: sudo systemctl restart seinn-agent
+# The app lists these as shares on its first screen (name shown, path beneath).
+# movies = "/srv/media/movies"
