@@ -30,8 +30,8 @@ seinn is opinionated about exactly two things:
 
 - **One format**: H.264 8-bit SDR + AAC in MP4/MOV, no B-frames — everything
   Apple silicon decodes in hardware, nothing it doesn't. B-frames alone cost
-  an 11–33 s open stall on Apple TV (proven with a matched-pair experiment);
-  `seinn-convert` exists so this is a policy, not a wall.
+  an 11–33 s open stall on Apple TV (proven with a matched-pair experiment).
+  `seinn-convert` exists so a library that isn't there yet can get there.
 - **One protocol**: HTTP with byte ranges. No SMB, NFS, SFTP, or DLNA — HTTP
   seeks faster on Apple hardware than any of them and is measurable end to end.
 

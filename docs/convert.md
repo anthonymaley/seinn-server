@@ -1,7 +1,7 @@
 # seinn-convert
 
-`seinn_convert.py` is a standalone, stdlib-only companion tool that makes
-"one format" a policy instead of a wall: point it at a folder and it probes
+`seinn_convert.py` is a standalone, stdlib-only companion tool that brings
+a library up to the codec contract: point it at a folder and it probes
 every video, reporting what it would convert to reach the codec contract
 (H.264 8-bit yuv420p, `bf=0`, AAC audio, MP4/MOV container). Most libraries
 need it for a fraction of their files.
@@ -33,8 +33,8 @@ Three lanes, chosen per file:
 
 Every conversion is verified before it replaces anything: the output is
 probed for compliance, then swapped in atomically. Originals are replaced
-in place (this is a normalizer, not an archiver) — the census tells you
-exactly what will happen before you say `--apply`.
+in place; the tool keeps no archive copies. The census tells you exactly
+what will happen before you say `--apply`.
 
 ## Safety properties
 
