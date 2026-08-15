@@ -4,8 +4,8 @@
 services:
   seinn:
     build: .
-    image: seinn-agent:local        # local tag only — no registry (pending
-                                    # open-source decision; do not push)
+    image: seinn-agent:local        # local tag only — no registry image
+                                    # is published yet
     ports:
       - "8378:8378"
     environment:
