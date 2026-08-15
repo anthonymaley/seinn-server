@@ -21,7 +21,8 @@ this server is everything they talk to.
 | `install.sh` | One-command install; interactive wizard when run with no flags on a TTY |
 | `seinn_agent.py --doctor` | Nine read-only health checks, one actionable fix line each |
 | `seinn_convert.py` | Library normalizer: probes your files, converts what needs it — dry-run by default |
-| `seinn_tui.py` | Full-screen terminal UI: dashboard, shares editor, converter (`install.sh --with-tui`) |
+| `seinn_web.html` | The browser management surface: claim once, then doctor, shares, settings, convert — served by the agent at `/` |
+| `seinn_tui.py` | Experimental terminal UI (parked — the browser surface is the supported experience) |
 | `Dockerfile` + compose example | The same agent as a container, config-survival guaranteed |
 
 ## The two opinions
@@ -68,6 +69,13 @@ The short version, on Linux:
 ```sh
 sudo ./install.sh
 ```
+
+The installer's last line prints `http://<server-ip>:8378/?code=XXXX-XXXX` —
+one click claims the server in your browser (Docker prints the same line in
+`docker logs seinn`). From there: doctor with fix lines, a real folder
+picker for shares, thumbnail/delete toggles, the app token as a QR, and
+`seinn-convert` with live progress. Reads stay open on the LAN; every
+change needs the claim session (12 h, cookie + CSRF).
 
 No flags on a TTY starts the interactive wizard: shares, service user,
 permissions, port, delete — each answer validated for real, with the exact

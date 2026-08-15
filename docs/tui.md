@@ -1,4 +1,4 @@
-# The seinn TUI
+# The seinn TUI (experimental, parked)
 
 A full-screen terminal UI for the server: a dashboard with live health
 checks, a shares editor, and the converter with progress.

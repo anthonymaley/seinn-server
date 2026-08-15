@@ -31,6 +31,7 @@ REQUIRED_FILES=(
     "seinn_agent.py"
     "seinn_convert.py"
     "seinn_tui.py"
+    "seinn_web.html"
     "install.sh"
     "seinn-agent.toml.example"
     "README.md"

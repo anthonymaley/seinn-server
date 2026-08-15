@@ -1,0 +1,1059 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Seinn</title>
+<style>
+/* Seinn server web experience — built to docs/design/SERVER-WEB.md.
+   Dark surface, one committed look (the management surface sits beside
+   terminals); doctor/census strings render verbatim from the agent. */
+:root{
+  --ground:#0A0A0B; --card:#141416; --line:rgba(255,255,255,.08);
+  --line-strong:rgba(255,255,255,.16); --text:#F5F5F3; --sub:#A1A1A6;
+  --dim:#6E6E73; --ok:#34C759; --warn:#FF9500; --bad:#FF453A;
+  --paper:#F5F5F3; --code-bg:rgba(0,0,0,.4);
+  --sans:'Helvetica Neue',Helvetica,system-ui,sans-serif;
+  --mono:ui-monospace,Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--ground);color:var(--text);font:15px/1.5 var(--sans);
+     -webkit-font-smoothing:antialiased;min-height:100vh}
+a{color:inherit;text-decoration:none}
+button{font:inherit;cursor:pointer;color:inherit;background:none;border:none}
+input{font:inherit}
+.mono{font-family:var(--mono)}
+.hidden{display:none!important}
+
+.wrap{max-width:1312px;margin:0 auto;padding:0 64px}
+@media (max-width:900px){.wrap{padding:0 24px}}
+
+/* ---- top bar (post-claim) ---- */
+.topbar{border-bottom:1px solid var(--line)}
+.topbar-inner{height:76px;display:flex;align-items:center;gap:14px}
+.mark{display:block;color:var(--text);flex:none}
+.brand-name{font-size:19px;font-weight:600;letter-spacing:-.01em}
+.host-line{font:13px var(--mono);color:var(--dim);margin-left:6px}
+.nav{display:flex;gap:26px;margin-left:auto;font-size:15px}
+.nav a{color:var(--dim);padding:6px 0;border-bottom:2px solid transparent}
+.nav a.active{color:var(--text);border-bottom-color:var(--text)}
+.nav a:focus-visible,.btn:focus-visible,input:focus-visible{outline:2px solid var(--warn);outline-offset:2px}
+.chip{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--dim);margin-left:26px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
+
+/* ---- cards & buttons ---- */
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px}
+.card.small{border-radius:12px}
+.card-h{font:600 12px var(--sans);letter-spacing:.06em;color:var(--dim);
+        text-transform:uppercase;margin:0 0 16px}
+.btn{border-radius:9px;font-weight:500;padding:0 20px;height:44px;display:inline-flex;
+     align-items:center;justify-content:center;gap:8px}
+.btn.primary{background:var(--paper);color:var(--ground)}
+.btn.primary:hover{background:#dddddb}
+.btn.secondary{border:1px solid var(--line-strong)}
+.btn.secondary:hover{border-color:rgba(255,255,255,.35)}
+.btn.destructive{color:var(--bad);border:1px solid rgba(255,69,58,.4)}
+.btn.inline{height:36px;padding:0 14px;font-size:14px}
+.btn[disabled]{opacity:.4;cursor:default}
+
+.codeline{background:var(--code-bg);border-radius:8px;padding:10px 12px;
+          font:13px/1.7 var(--mono);color:var(--sub);overflow-x:auto;white-space:pre-wrap;word-break:break-all}
+
+/* ---- claim ---- */
+.claim-view{min-height:100vh;display:flex;flex-direction:column;align-items:center;
+            justify-content:center;padding:40px 24px;gap:0}
+.claim-view .mark{margin-bottom:30px}
+.claim-title{font-size:30px;font-weight:600;margin:0 0 12px;text-align:center;text-wrap:balance}
+.claim-sub{color:var(--sub);max-width:480px;text-align:center;margin:0 0 36px;text-wrap:pretty}
+.claim-card{width:min(520px,100%);border-radius:16px;padding:28px}
+.claim-row{display:flex;gap:12px}
+.claim-input{flex:1;height:64px;background:var(--ground);border:1px solid var(--line-strong);
+             border-radius:10px;color:var(--text);text-align:center;
+             font:600 28px var(--mono);letter-spacing:.18em;text-transform:uppercase}
+.claim-input::placeholder{color:#3a3a3e;letter-spacing:.18em}
+.claim-btn{width:130px;height:64px;flex:none}
+.claim-help{font-size:13.5px;color:var(--dim);margin:16px 0 0;line-height:1.6}
+.claim-error{margin:14px 0 0}
+.claim-footer{display:flex;gap:28px;flex-wrap:wrap;justify-content:center;align-items:center;
+              font-size:13px;color:var(--dim);margin-top:44px;text-align:center}
+.claim-footer span{display:flex;align-items:center;gap:7px}
+@keyframes shake{10%,90%{transform:translateX(-2px)}20%,80%{transform:translateX(4px)}
+ 30%,50%,70%{transform:translateX(-6px)}40%,60%{transform:translateX(6px)}}
+.shake{animation:shake .5s}
+@media (prefers-reduced-motion:reduce){.shake{animation:none;border-color:var(--warn)!important}}
+
+/* ---- finding (doctor) cards ---- */
+.finding{border-left:3px solid var(--warn);border-radius:10px;background:rgba(255,149,0,.06);
+         padding:16px 18px;margin-top:16px}
+.finding .lvl{font:600 11px var(--mono);color:var(--warn);letter-spacing:.05em;margin-right:10px}
+.finding .msg{font-weight:500}
+.finding .codeline{margin-top:10px}
+.finding .note{font-size:13px;color:var(--dim);margin-top:10px}
+
+/* ---- layout: main + side ---- */
+.page{padding:36px 0 72px}
+.cols{display:flex;gap:32px;align-items:flex-start;flex-wrap:wrap}
+.col-main{flex:1 1 620px;min-width:0}
+.col-side{flex:0 1 440px;display:flex;flex-direction:column;gap:20px;min-width:300px}
+h1.page-title{font-size:22px;font-weight:600;margin:0}
+.page-head{display:flex;align-items:baseline;gap:14px;margin-bottom:22px;flex-wrap:wrap}
+.page-head .meta{font:13px var(--mono);color:var(--dim)}
+.page-head .spacer{flex:1}
+
+/* ---- doctor panel ---- */
+.doc-row{display:flex;align-items:flex-start;gap:0;padding:9px 12px;border-radius:8px;
+         font:13.5px/1.6 var(--mono);color:var(--sub)}
+.doc-row .lvl{flex:none;width:44px;font-weight:600;font-size:11px;letter-spacing:.04em;padding-top:2px}
+.doc-row.PASS .lvl{color:var(--ok)} .doc-row.FAIL .lvl,.doc-row.WARN .lvl{color:var(--warn)}
+.doc-row.INFO .lvl,.doc-row.SKIP .lvl{color:var(--dim)}
+.doc-row.FAIL,.doc-row.WARN{background:rgba(255,149,0,.06);border-left:3px solid var(--warn);
+                            border-radius:0 8px 8px 0;margin-left:-3px}
+.doc-row .body{min-width:0}
+.doc-row .fix{margin-top:8px}
+.doc-verdict{font:13px var(--mono);margin-top:14px}
+.doc-verdict.ok{color:var(--ok)} .doc-verdict.issues{color:var(--warn)}
+
+/* ---- shares card / rows ---- */
+.share-row{display:flex;align-items:center;gap:12px;padding:12px 4px;border-bottom:1px solid var(--line)}
+.share-row:last-child{border-bottom:none}
+.share-name{font-weight:500;display:flex;align-items:center;gap:8px}
+.share-name .warn-dot{width:7px;height:7px;border-radius:50%;background:var(--warn)}
+.share-path{font:12px var(--mono);color:var(--dim);word-break:break-all}
+.share-facts{margin-left:auto;text-align:right;font:13px var(--mono);color:var(--dim);flex:none}
+.share-facts .orange{color:var(--warn)}
+
+/* ---- folder picker ---- */
+.crumbs{font:13px var(--mono);color:var(--dim);padding:10px 12px;border-bottom:1px solid var(--line);
+        display:flex;gap:4px;flex-wrap:wrap}
+.crumbs button{color:var(--sub);padding:0 2px}
+.crumbs button:hover{color:var(--text)}
+.dirlist{max-height:340px;overflow-y:auto}
+.dir-row{display:flex;align-items:center;gap:10px;width:100%;text-align:left;
+         padding:10px 12px;border-radius:8px;font-size:15px;font-weight:500}
+.dir-row:hover{background:rgba(245,245,243,.05)}
+.dir-row.selected{background:rgba(245,245,243,.08)}
+.dir-row .glyph{color:var(--dim);flex:none}
+.dir-row .facts{margin-left:auto;font:13px var(--mono);color:var(--dim);font-weight:400;flex:none}
+.picker-foot{display:flex;gap:10px;align-items:center;border-top:1px solid var(--line);
+             padding-top:14px;margin-top:6px;flex-wrap:wrap}
+.picker-foot input{background:var(--ground);border:1px solid var(--line-strong);border-radius:8px;
+                   height:38px;padding:0 12px;color:var(--text)}
+#pick-path-input{flex:1;min-width:180px;font-family:var(--mono);font-size:13px}
+#pick-name-input{width:130px}
+
+/* ---- toggles ---- */
+.tog-row{display:flex;align-items:flex-start;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}
+.tog-row:last-child{border-bottom:none}
+.tog-row .lbl{font-weight:500}
+.tog-row .sub{font-size:13px;color:var(--dim);margin-top:3px;text-wrap:pretty}
+.tog{margin-left:auto;flex:none;width:36px;height:22px;border-radius:11px;background:rgba(255,255,255,.15);
+     position:relative;transition:background .15s}
+.tog::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;
+            background:#fff;transition:left .15s}
+.tog.on{background:var(--ok)} .tog.on::after{left:16px}
+@media (prefers-reduced-motion:reduce){.tog,.tog::after{transition:none}}
+
+/* ---- setup ---- */
+.setup-steps{font-size:14px;color:var(--dim);margin-left:auto}
+.connect-flex{display:flex;gap:48px;align-items:center;justify-content:center;flex-wrap:wrap;padding:24px 0}
+.qr-tile{background:var(--paper);border-radius:20px;padding:28px;flex:none}
+.qr-tile.small{border-radius:12px;padding:10px}
+.connect-col{max-width:460px;display:flex;flex-direction:column;gap:16px}
+.connect-col h2{font-size:28px;font-weight:600;margin:0;text-wrap:balance}
+.connect-col .expl{color:var(--sub);font-size:16px;text-wrap:pretty}
+.token-line{font:500 22px var(--mono);letter-spacing:.1em;word-break:break-all}
+
+/* ---- convert ---- */
+.census-grid{width:100%;border-collapse:collapse;font:13.5px var(--mono)}
+.census-grid th{font:600 11px var(--mono);color:var(--dim);text-transform:uppercase;
+                letter-spacing:.05em;text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+.census-grid td{padding:9px 10px;border-bottom:1px solid var(--line);color:var(--sub)}
+.census-grid tr:last-child td{border-bottom:none}
+.census-grid .num{text-align:right;font-variant-numeric:tabular-nums}
+.vdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px;vertical-align:1px}
+.vdot.green{background:var(--ok)} .vdot.paper{background:var(--paper)}
+.vdot.orange{background:var(--warn)} .vdot.hollow{background:none;border:1px solid var(--dim)}
+.caveat{font-size:12.5px;color:var(--dim);margin-top:14px;text-wrap:pretty}
+.prog-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.prog-head .state{font:600 12px var(--sans);letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+.prog-head .nums{margin-left:auto;font:13px var(--mono);color:var(--sub)}
+.bar{height:6px;border-radius:3px;background:rgba(255,255,255,.09);margin:14px 0;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--paper);border-radius:3px;transition:width .4s}
+@media (prefers-reduced-motion:reduce){.bar i{transition:none}}
+.prog-foot{display:flex;align-items:center;gap:12px;font:12.5px var(--mono);color:var(--dim);flex-wrap:wrap}
+.prog-foot .stop{margin-left:auto}
+
+/* ---- empty / state cards ---- */
+.state-card{border-radius:12px;text-align:center;padding:44px 24px;display:flex;
+            flex-direction:column;align-items:center;gap:14px}
+.state-card .glyph{color:var(--dim)}
+.state-card h3{margin:0;font-size:19px;font-weight:600}
+.state-card p{margin:0;color:var(--sub);max-width:420px;text-wrap:pretty}
+.banner{border:1px solid var(--line-strong);border-radius:12px;background:var(--card);
+        padding:16px 20px;display:flex;gap:16px;align-items:center;margin-bottom:20px;flex-wrap:wrap}
+.banner .msg{color:var(--sub)} .banner .btn{margin-left:auto}
+
+/* ---- activity ---- */
+.act-row{display:flex;gap:12px;font:12.5px var(--mono);padding:6px 0}
+.act-row .t{color:var(--dim);flex:none} .act-row .e{color:var(--sub);word-break:break-word}
+
+footer.pagefoot{border-top:1px solid var(--line);margin-top:56px;padding:24px 0;
+  font-size:13px;color:var(--dim);display:flex;gap:24px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <!-- chosen comp 1b: 5 strokes, centred, width:gap 6:7 — the diagonal is
+       the play glyph -->
+  <symbol id="mark-template" viewBox="0 0 58 64">
+    <rect x="0" y="25" width="6" height="14" rx="1.2" fill="currentColor"/>
+    <rect x="13" y="18.5" width="6" height="27" rx="1.2" fill="currentColor"/>
+    <rect x="26" y="12" width="6" height="40" rx="1.2" fill="currentColor"/>
+    <rect x="39" y="5.5" width="6" height="53" rx="1.2" fill="currentColor"/>
+    <rect x="52" y="0" width="6" height="64" rx="1.2" fill="currentColor"/>
+  </symbol>
+</svg>
+
+<!-- ================= CLAIM ================= -->
+<section id="view-claim" class="claim-view hidden">
+  <svg class="mark" width="48" height="52" viewBox="0 0 58 64"><use href="#mark-template"/></svg>
+  <h1 class="claim-title">Seinn is running on this machine</h1>
+  <p class="claim-sub">Enter the claim code to manage it from this browser. The code proves
+  you own the host — it is not an account, and nothing leaves your network.</p>
+  <div class="card claim-card">
+    <p class="card-h">Claim code</p>
+    <div class="claim-row">
+      <input id="claim-input" class="claim-input" placeholder="XXXX-XXXX" maxlength="9"
+             autocomplete="off" spellcheck="false" autofocus>
+      <button id="claim-btn" class="btn primary claim-btn">Claim</button>
+    </div>
+    <p class="claim-help">The code is in the installer's last line, in
+    <span class="mono">docker logs seinn</span>, and in the
+    <span class="mono">claim-code</span> file beside the agent's config.
+    It works once; this browser then holds a 12&#8202;h session.</p>
+    <div id="claim-error" class="finding claim-error hidden">
+      <span class="lvl">FAIL</span><span class="msg" id="claim-error-msg"></span>
+    </div>
+  </div>
+  <div class="claim-footer">
+    <span><i class="dot"></i><span id="claim-agent-line" class="mono">agent</span></span>
+    <span>plain HTTP on your LAN — fine at home, don't port-forward it</span>
+    <span>no account &middot; no cloud &middot; no telemetry</span>
+  </div>
+</section>
+
+<!-- ================= APP CHROME ================= -->
+<div id="app" class="hidden">
+<header class="topbar"><div class="wrap topbar-inner">
+  <svg class="mark" width="22" height="24" viewBox="0 0 58 64"><use href="#mark-template"/></svg>
+  <span class="brand-name">Seinn</span>
+  <span id="host-line" class="host-line"></span>
+  <nav class="nav" id="nav">
+    <a href="#status" data-view="dash">Status</a>
+    <a href="#shares" data-view="shares">Shares</a>
+    <a href="#convert" data-view="convert">Convert</a>
+    <a href="#connect" data-view="connect">Connect</a>
+  </nav>
+  <span class="chip"><i class="dot"></i><span id="session-chip">claimed</span></span>
+</div></header>
+
+<main class="wrap page">
+  <div id="expired-banner" class="banner hidden">
+    <span class="msg">Sessions last 12 hours. Status stays visible; changing anything asks
+    for the claim code again.</span>
+    <button class="btn secondary inline" onclick="location.reload()">Re-enter claim code</button>
+  </div>
+
+  <!-- ============ SETUP ============ -->
+  <section id="view-setup" class="hidden">
+    <div class="page-head">
+      <h1 class="page-title" id="setup-title">Setup</h1>
+      <span class="setup-steps" id="setup-steps"></span>
+    </div>
+    <div id="setup-1" class="hidden">
+      <div class="card" style="max-width:640px">
+        <p class="card-h">Claimed</p>
+        <p style="margin:0 0 6px">This server is yours. The agent is serving on port
+        <span class="mono" id="setup-port"></span>.</p>
+        <p style="color:var(--dim);font-size:13.5px;margin:0 0 20px">Next: add the folders
+        you want on the television.</p>
+        <button class="btn primary" onclick="setupGo(2)">Continue</button>
+      </div>
+    </div>
+    <div id="setup-2" class="hidden">
+      <div class="cols">
+        <div class="col-main card">
+          <p class="card-h">Add a folder to serve</p>
+          <div id="picker"></div>
+          <div id="setup-finding"></div>
+        </div>
+        <div class="col-side">
+          <div class="card small" id="while-here"></div>
+          <div class="card small">
+            <p class="card-h">Serving</p>
+            <div id="setup-share-list"></div>
+            <button class="btn primary inline" style="margin-top:14px" id="setup-continue"
+                    onclick="setupGo(3)">Continue</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="setup-3" class="hidden">
+      <div class="connect-flex" id="setup-connect"></div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:10px">
+        <button class="btn primary" onclick="finishSetup()">Finish — go to the dashboard</button>
+        <span style="font-size:13px;color:var(--dim)">you can always connect apps later</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DASHBOARD ============ -->
+  <section id="view-dash" class="hidden">
+    <div class="cols">
+      <div class="col-main">
+        <div class="page-head">
+          <h1 class="page-title">Doctor</h1>
+          <span class="meta" id="doc-ran"></span>
+          <span class="spacer"></span>
+          <button class="btn secondary inline" onclick="loadDoctor(true)">Run again</button>
+        </div>
+        <div class="card" id="doctor-panel"></div>
+        <div id="doc-verdict" class="doc-verdict"></div>
+      </div>
+      <div class="col-side">
+        <div class="card small">
+          <p class="card-h">Shares</p>
+          <div id="dash-shares"></div>
+        </div>
+        <div class="card small">
+          <p class="card-h">Connect the app</p>
+          <div style="display:flex;gap:16px;align-items:center">
+            <div class="qr-tile small"><canvas id="qr-small" width="92" height="92"></canvas></div>
+            <p style="margin:0;font-size:13.5px;color:var(--sub)">Scan with the iPhone app,
+            or open <a href="#connect" class="mono" style="border-bottom:1px solid var(--line-strong)">Connect</a>
+            for the token.</p>
+          </div>
+        </div>
+        <div class="card small">
+          <p class="card-h">Recent activity</p>
+          <div id="dash-activity"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SHARES ============ -->
+  <section id="view-shares" class="hidden">
+    <div class="page-head"><h1 class="page-title">Shares</h1></div>
+    <div class="cols">
+      <div class="col-main">
+        <div class="card"><div id="shares-list"></div></div>
+        <div class="card" style="margin-top:20px">
+          <p class="card-h">Add a share</p>
+          <div id="shares-picker"></div>
+          <div id="shares-finding"></div>
+        </div>
+      </div>
+      <div class="col-side"><div class="card small" id="shares-while-here"></div></div>
+    </div>
+  </section>
+
+  <!-- ============ CONVERT ============ -->
+  <section id="view-convert" class="hidden">
+    <div class="page-head">
+      <h1 class="page-title" id="convert-title">Convert</h1>
+      <span class="meta" id="convert-meta"></span>
+      <span class="spacer"></span>
+      <select id="convert-root" class="mono" style="background:var(--card);color:var(--text);
+        border:1px solid var(--line-strong);border-radius:8px;height:36px;padding:0 10px"></select>
+      <button class="btn secondary inline" id="census-btn" onclick="runCensus()">Run census</button>
+    </div>
+    <div id="convert-body"></div>
+  </section>
+
+  <!-- ============ CONNECT ============ -->
+  <section id="view-connect" class="hidden">
+    <div class="connect-flex" id="connect-flex"></div>
+  </section>
+
+  <footer class="pagefoot">
+    <span id="foot-agent" class="mono"></span>
+    <span>plain HTTP on your LAN — fine at home, don't port-forward it</span>
+    <span>no account &middot; no cloud &middot; no telemetry</span>
+  </footer>
+</main>
+</div>
+
+<script>
+"use strict";
+/* ============ tiny helpers ============ */
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const CSRF_KEY = "seinn-csrf";
+let STATE = null;          // /api/web/state payload
+let currentView = null;
+
+function fmtBytes(n){
+  if (n == null) return "—";
+  const u = ["B","KB","MB","GB","TB"]; let i = 0;
+  while (n >= 1024 && i < u.length-1){ n /= 1024; i++; }
+  return (i === 0 ? n : n.toFixed(1)) + " " + u[i];
+}
+function fmtUptime(s){
+  if (s < 120) return `up ${s|0} seconds`;
+  if (s < 7200) return `up ${(s/60)|0} minutes`;
+  if (s < 172800) return `up ${(s/3600)|0} hours`;
+  return `up ${(s/86400)|0} days`;
+}
+function fmtEta(s){
+  if (s == null) return "";
+  if (s < 90) return `${s|0} s`;
+  if (s < 5400) return `${(s/60)|0} min`;
+  return `~${(s/3600).toFixed(1)} h`;
+}
+function fmtClock(epoch){
+  const d = new Date(epoch*1000);
+  return d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+}
+
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  let data = null;
+  try { data = await r.json(); } catch (e) {}
+  if (r.status === 401 && currentView !== "claim"){
+    $("expired-banner").classList.remove("hidden");
+  }
+  return {ok: r.ok, status: r.status, data};
+}
+function mut(path, body){
+  return api(path, {method:"POST",
+    headers: {"X-Seinn-CSRF": localStorage.getItem(CSRF_KEY) || "",
+              "Content-Type": "application/json"},
+    body: JSON.stringify(body || {})});
+}
+
+/* ============ QR (byte mode, ECC M, mask 0, versions 1-8) ============ */
+const QR_SPEC = { // version: [[blocks, dataPerBlock]...], eccPerBlock
+  1:[[[1,16]],10], 2:[[[1,28]],16], 3:[[[1,44]],26], 4:[[[2,32]],18],
+  5:[[[2,43]],24], 6:[[[4,27]],16], 7:[[[4,31]],18], 8:[[[2,38],[2,39]],22],
+};
+const QR_ALIGN = {1:[],2:[6,18],3:[6,22],4:[6,26],5:[6,30],6:[6,34],7:[6,22,38],8:[6,24,42]};
+function rsGenPoly(deg){
+  // GF(256), poly x^8+x^4+x^3+x^2+1
+  const EXP = new Array(512), LOG = new Array(256);
+  let x = 1;
+  for (let i = 0; i < 255; i++){ EXP[i] = x; LOG[x] = i; x <<= 1; if (x & 0x100) x ^= 0x11d; }
+  for (let i = 255; i < 512; i++) EXP[i] = EXP[i-255];
+  const mul = (a,b) => (a && b) ? EXP[LOG[a]+LOG[b]] : 0;
+  let poly = [1];
+  for (let d = 0; d < deg; d++){
+    const next = new Array(poly.length+1).fill(0);
+    for (let i = 0; i < poly.length; i++){
+      next[i] ^= mul(poly[i], EXP[d]);
+      next[i+1] ^= poly[i];
+    }
+    poly = next;
+  }
+  return {poly, mul};
+}
+function rsRemainder(data, deg){
+  const {poly, mul} = rsGenPoly(deg);
+  const res = new Array(deg).fill(0);
+  for (const b of data){
+    const factor = b ^ res[0];
+    res.shift(); res.push(0);
+    for (let i = 0; i < poly.length-1; i++) res[i] ^= mul(poly[i+1], factor);
+  }
+  return res;
+}
+function qrEncode(text){
+  const bytes = new TextEncoder().encode(text);
+  let version = null;
+  for (let v = 1; v <= 8; v++){
+    const cap = QR_SPEC[v][0].reduce((a,[n,len]) => a + n*len, 0);
+    if (bytes.length + 2 <= cap){ version = v; break; }
+  }
+  if (version === null) return null;
+  const [groups, eccLen] = QR_SPEC[version];
+  const dataCap = groups.reduce((a,[n,len]) => a + n*len, 0);
+  // bit stream: mode 0100, 8-bit count, data, terminator, pad
+  const bits = [];
+  const push = (val, n) => { for (let i = n-1; i >= 0; i--) bits.push((val>>>i)&1); };
+  push(4,4); push(bytes.length,8);
+  for (const b of bytes) push(b,8);
+  push(0, Math.min(4, dataCap*8 - bits.length));
+  while (bits.length % 8) bits.push(0);
+  const data = [];
+  for (let i = 0; i < bits.length; i += 8)
+    data.push(bits.slice(i,i+8).reduce((a,b)=>(a<<1)|b,0));
+  const pads = [0xEC, 0x11]; let pi = 0;
+  while (data.length < dataCap) data.push(pads[(pi++)%2]);
+  // split into blocks, compute ecc, interleave
+  const blocks = [], eccs = [];
+  let off = 0;
+  for (const [n, len] of groups)
+    for (let b = 0; b < n; b++){
+      const chunk = data.slice(off, off+len); off += len;
+      blocks.push(chunk); eccs.push(rsRemainder(chunk, eccLen));
+    }
+  const inter = [];
+  const maxLen = Math.max(...blocks.map(b=>b.length));
+  for (let i = 0; i < maxLen; i++) for (const b of blocks) if (i < b.length) inter.push(b[i]);
+  for (let i = 0; i < eccLen; i++) for (const e of eccs) inter.push(e[i]);
+  // matrix
+  const size = 17 + version*4;
+  const M = Array.from({length:size}, () => new Array(size).fill(null)); // null = free
+  const set = (x,y,v) => { M[y][x] = v; };
+  const finder = (x,y) => {
+    for (let dy = -1; dy <= 7; dy++) for (let dx = -1; dx <= 7; dx++){
+      const xx = x+dx, yy = y+dy;
+      if (xx < 0 || yy < 0 || xx >= size || yy >= size) continue;
+      const on = dx >= 0 && dx <= 6 && dy >= 0 && dy <= 6 &&
+        (dx === 0 || dx === 6 || dy === 0 || dy === 6 || (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4));
+      set(xx, yy, on ? 1 : 0);
+    }
+  };
+  finder(0,0); finder(size-7,0); finder(0,size-7);
+  const aligns = QR_ALIGN[version];
+  for (const cy of aligns) for (const cx of aligns){
+    if (M[cy][cx] !== null) continue;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++)
+      set(cx+dx, cy+dy, (Math.max(Math.abs(dx),Math.abs(dy)) !== 1) ? 1 : 0);
+  }
+  for (let i = 8; i < size-8; i++){
+    if (M[6][i] === null) set(i,6,(i+1)%2);
+    if (M[i][6] === null) set(6,i,(i+1)%2);
+  }
+  set(8, size-8, 1); // dark module
+  // format info (ECC M = 00, mask 0)
+  let fdata = 0b00000, rem = fdata;
+  for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+  const fmt = ((fdata << 10) | rem) ^ 0x5412;
+  for (let i = 0; i <= 5; i++)  set(8, i, (fmt>>>i)&1);
+  set(8,7,(fmt>>>6)&1); set(8,8,(fmt>>>7)&1); set(7,8,(fmt>>>8)&1);
+  for (let i = 9; i <= 14; i++) set(14-i, 8, (fmt>>>i)&1);
+  for (let i = 0; i <= 7; i++)  set(size-1-i, 8, (fmt>>>i)&1);
+  for (let i = 8; i <= 14; i++) set(8, size-15+i, (fmt>>>i)&1);
+  // data placement
+  let bi = 0;
+  const total = inter.length * 8;
+  let upward = true;
+  for (let col = size-1; col >= 1; col -= 2){
+    if (col === 6) col = 5;
+    const ys = upward ? Array.from({length:size},(_,i)=>size-1-i)
+                      : Array.from({length:size},(_,i)=>i);
+    for (const y of ys) for (const x of [col, col-1]){
+      if (M[y][x] !== null) continue;
+      let bit = 0;
+      if (bi < total) bit = (inter[bi>>3] >>> (7-(bi&7))) & 1;
+      bi++;
+      if ((x + y) % 2 === 0) bit ^= 1;   // mask 0
+      set(x, y, bit);
+    }
+    upward = !upward;
+  }
+  return M;
+}
+function drawQR(canvas, text, pixels){
+  const M = qrEncode(text);
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#F5F5F3"; ctx.fillRect(0,0,canvas.width,canvas.height);
+  if (!M){ return; }
+  const n = M.length;
+  const scale = Math.floor(pixels / (n+2)) || 1;
+  const dim = scale * n;
+  canvas.width = canvas.height = pixels;
+  ctx.fillStyle = "#F5F5F3"; ctx.fillRect(0,0,pixels,pixels);
+  const o = Math.floor((pixels - dim) / 2);
+  ctx.fillStyle = "#0A0A0B";
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++)
+    if (M[y][x]) ctx.fillRect(o + x*scale, o + y*scale, scale, scale);
+}
+
+/* ============ router ============ */
+function show(view){
+  currentView = view;
+  $("view-claim").classList.add("hidden");
+  $("app").classList.remove("hidden");
+  for (const v of ["setup","dash","shares","convert","connect"])
+    $("view-"+v).classList.toggle("hidden", v !== view);
+  document.querySelectorAll("#nav a").forEach(a =>
+    a.classList.toggle("active", a.dataset.view === view ||
+      (view === "dash" && a.dataset.view === "dash")));
+  if (view === "dash"){ renderDash(); }
+  if (view === "shares"){ renderShares(); }
+  if (view === "convert"){ renderConvert(); }
+  if (view === "connect"){ renderConnect($("connect-flex"), 300); }
+}
+window.addEventListener("hashchange", routeFromHash);
+function routeFromHash(){
+  if (!STATE || !STATE.claimed) return;
+  const h = location.hash.replace("#","");
+  show({status:"dash", shares:"shares", convert:"convert", connect:"connect",
+        setup:"setup"}[h] || "dash");
+  if (h === "setup") setupGo(1);
+}
+
+async function boot(){
+  const {data} = await api("/api/web/state");
+  STATE = data;
+  if (!STATE){ document.body.textContent = "agent unreachable"; return; }
+  $("claim-agent-line").textContent =
+    `agent ${STATE.agent_version} · ${fmtUptime(STATE.uptime_s)}`;
+  // The installer/Docker last line may print the URL with ?code=XXXX-XXXX —
+  // one click from the terminal to a claimed dashboard. Single-use like the
+  // typed path; the query is stripped from history immediately.
+  const urlCode = new URLSearchParams(location.search).get("code");
+  if (!STATE.claimed && urlCode){
+    history.replaceState(null, "", location.pathname + location.hash);
+    const r = await mut("/api/web/claim", {code: urlCode});
+    if (r.ok){
+      localStorage.setItem(CSRF_KEY, r.data.csrf);
+      const s = await api("/api/web/state"); STATE = s.data;
+    }
+  }
+  if (!STATE.claimed){ showClaim(); return; }
+  chrome();
+  if (STATE.roots.length === 0){ show("setup"); setupGo(2); }
+  else routeFromHash();
+}
+function chrome(){
+  $("host-line").textContent =
+    `${STATE.host} · ${STATE.agent_version} · ${fmtUptime(STATE.uptime_s)}`;
+  $("foot-agent").textContent = `seinn-agent ${STATE.agent_version} · ${STATE.host}:${STATE.port}`;
+  if (STATE.session_expires){
+    const h = Math.max(0, Math.round((STATE.session_expires*1000 - Date.now())/3600000));
+    $("session-chip").textContent = `claimed · session ${h} h left`;
+  }
+}
+
+/* ============ claim ============ */
+function showClaim(){
+  $("app").classList.add("hidden");
+  $("view-claim").classList.remove("hidden");
+  currentView = "claim";
+  const input = $("claim-input");
+  input.focus();
+  input.addEventListener("input", () => {
+    let v = input.value.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,8);
+    input.value = v.length > 4 ? v.slice(0,4) + "-" + v.slice(4) : v;
+  });
+  const go = async () => {
+    const code = input.value;
+    const r = await mut("/api/web/claim", {code});
+    if (r.ok){
+      localStorage.setItem(CSRF_KEY, r.data.csrf);
+      location.hash = "";
+      await boot();
+      return;
+    }
+    $("claim-error").classList.remove("hidden");
+    $("claim-error-msg").textContent = (r.data && r.data.error) || "claim failed";
+    input.classList.remove("shake"); void input.offsetWidth; input.classList.add("shake");
+  };
+  $("claim-btn").addEventListener("click", go);
+  input.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+}
+
+/* ============ doctor ============ */
+let DOCTOR = null;
+async function loadDoctor(force){
+  if (DOCTOR && !force) return DOCTOR;
+  const {data} = await api("/api/web/doctor");
+  DOCTOR = data;
+  renderDoctor();
+  return DOCTOR;
+}
+function renderDoctor(){
+  if (!DOCTOR) return;
+  const panel = $("doctor-panel");
+  const rows = DOCTOR.rows;
+  const parts = [];
+  let i = 0;
+  while (i < rows.length){
+    const r = rows[i];
+    // merge adjacent short PASS rows with · separators; non-PASS stands alone
+    if (r.level === "PASS" && r.message.length < 40 &&
+        i+1 < rows.length && rows[i+1].level === "PASS" && rows[i+1].message.length < 40){
+      const merged = [r.message];
+      while (i+1 < rows.length && rows[i+1].level === "PASS" &&
+             rows[i+1].message.length < 40 && merged.join(" · ").length < 60){
+        merged.push(rows[++i].message);
+      }
+      parts.push(`<div class="doc-row PASS"><span class="lvl">PASS</span>
+        <span class="body">${esc(merged.join("  ·  "))}</span></div>`);
+    } else {
+      const fix = (r.fix && (r.level === "FAIL" || r.level === "WARN"))
+        ? `<div class="codeline fix">fix: ${esc(r.fix)}</div>` : "";
+      parts.push(`<div class="doc-row ${esc(r.level)}"><span class="lvl">${esc(r.level)}</span>
+        <span class="body">${esc(r.message)}${fix}</span></div>`);
+    }
+    i++;
+  }
+  panel.innerHTML = parts.join("");
+  const verdict = DOCTOR.verdict[1] || String(DOCTOR.verdict);
+  const ok = String(verdict).includes("PASS");
+  const v = $("doc-verdict");
+  v.textContent = verdict;
+  v.className = "doc-verdict " + (ok ? "ok" : "issues");
+  $("doc-ran").textContent = "ran " + Math.max(0,((Date.now()/1000 - DOCTOR.ran_at)|0)) + " s ago";
+}
+
+/* ============ dashboard ============ */
+async function renderDash(){
+  loadDoctor();
+  const {data: st} = await api("/api/web/state");
+  if (st) { STATE = st; chrome(); }
+  const failRoots = new Set();
+  if (DOCTOR) for (const r of DOCTOR.rows)
+    if (r.level === "FAIL" && r.message.startsWith("root "))
+      failRoots.add(r.message.split(" ")[1].replace(":",""));
+  $("dash-shares").innerHTML = STATE.roots.length === 0
+    ? emptyShares()
+    : STATE.roots.map(r => `
+      <div class="share-row">
+        <div>
+          <div class="share-name">${esc(r.name)}${failRoots.has(r.name) ? '<i class="warn-dot"></i>' : ''}</div>
+          <div class="share-path">${esc(r.path)}</div>
+        </div>
+        <div class="share-facts">${failRoots.has(r.name)
+          ? '<span class="orange">not readable</span>'
+          : `${(r.entry_count ?? "—").toLocaleString?.() ?? r.entry_count} files<br>${fmtBytes(r.free_bytes)} free`}</div>
+      </div>`).join("");
+  const {data: ev} = await api("/api/web/events");
+  $("dash-activity").innerHTML = (ev && ev.events.length)
+    ? ev.events.slice().reverse().map(e =>
+        `<div class="act-row"><span class="t">${fmtClock(e.t)}</span><span class="e">${esc(e.event)}</span></div>`).join("")
+    : `<div class="act-row"><span class="e">nothing yet — activity shows here as the apps are used</span></div>`;
+  drawConnectQR("qr-small", 92);
+}
+function emptyShares(){
+  return `<div class="state-card">
+    <svg class="glyph" width="34" height="34" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.5"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+    <h3>Seinn is running but serving nothing</h3>
+    <p>Add a folder and the apps light up.</p>
+    <a class="btn primary inline" href="#shares">Add a share</a>
+  </div>`;
+}
+
+/* ============ folder picker (shared by setup + shares) ============ */
+function pickerHTML(prefix){
+  return `<div class="crumbs" id="${prefix}-crumbs"></div>
+    <div class="dirlist" id="${prefix}-dirs"></div>
+    <div class="picker-foot">
+      <input id="pick-path-input" data-prefix="${prefix}" placeholder="or type a path — /srv/media"
+             spellcheck="false" autocomplete="off">
+      <input id="pick-name-input" data-prefix="${prefix}" placeholder="share name" spellcheck="false">
+      <button class="btn primary inline" data-add-share="${esc(prefix)}">Add this folder</button>
+    </div>`;
+}
+const PICK = {path:"/", selected:null};
+async function browse(prefix, path){
+  const r = await api("/api/web/fs?path=" + encodeURIComponent(path));
+  if (!r.ok) return;
+  PICK.path = r.data.path; PICK.selected = null;
+  // Untrusted strings (paths, names) go ONLY into data attributes, never
+  // into inline handler JS — delegated listeners read them back out.
+  const crumbs = [];
+  const segs = r.data.path.split("/").filter(Boolean);
+  crumbs.push(`<button data-nav="/" data-prefix="${esc(prefix)}">/</button>`);
+  let acc = "";
+  for (const s of segs){
+    acc += "/" + s;
+    crumbs.push(`<button data-nav="${esc(acc)}" data-prefix="${esc(prefix)}">${esc(s)}</button><span>/</span>`);
+  }
+  document.getElementById(prefix+"-crumbs").innerHTML = crumbs.join("");
+  const rows = r.data.dirs.map(d => {
+    const full = (r.data.path === "/" ? "" : r.data.path) + "/" + d.name;
+    const facts = d.dirs < 0 ? "unreadable"
+      : `${d.dirs} folders · ${d.files.toLocaleString()} files`;
+    return `<button class="dir-row" data-path="${esc(full)}" data-prefix="${esc(prefix)}">
+      <svg class="glyph" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.5"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      ${esc(d.name)}<span class="facts">${d.dirs+d.files === 0 ? "empty" : facts}</span></button>`;
+  });
+  if (r.data.parent !== null)
+    rows.unshift(`<button class="dir-row" data-nav="${esc(r.data.parent)}" data-prefix="${esc(prefix)}">
+      <span class="glyph">↑</span>..<span class="facts">up</span></button>`);
+  document.getElementById(prefix+"-dirs").innerHTML = rows.join("") ||
+    `<div class="act-row"><span class="e">no subfolders here</span></div>`;
+}
+// Delegated handlers for everything the picker and shares list render —
+// the counterpart of the data-attribute rule above.
+document.addEventListener("click", e => {
+  const nav = e.target.closest("[data-nav]");
+  if (nav){ browse(nav.dataset.prefix, nav.dataset.nav); return; }
+  const row = e.target.closest(".dir-row[data-path]");
+  if (row){ selectDir(row, row.dataset.prefix); return; }
+  const really = e.target.closest("[data-really-remove]");
+  if (really){ removeShare(really.dataset.reallyRemove); return; }
+  const ask = e.target.closest("[data-ask-remove]");
+  if (ask){ confirmRemove = ask.dataset.askRemove; renderShares(); return; }
+  if (e.target.closest("[data-keep]")){ confirmRemove = null; renderShares(); return; }
+  const add = e.target.closest("[data-add-share]");
+  if (add) addShare(add.dataset.addShare);
+});
+document.addEventListener("dblclick", e => {
+  const row = e.target.closest(".dir-row[data-path]");
+  if (row) browse(row.dataset.prefix, row.dataset.path);
+});
+
+function selectDir(el, prefix){
+  document.querySelectorAll(`#${prefix}-dirs .dir-row`).forEach(r => r.classList.remove("selected"));
+  el.classList.add("selected");
+  PICK.selected = el.dataset.path || null;
+  if (PICK.selected){
+    const input = document.querySelector(`#pick-path-input[data-prefix="${prefix}"]`) ||
+                  document.getElementById("pick-path-input");
+    input.value = PICK.selected;
+    const name = document.querySelector(`#pick-name-input[data-prefix="${prefix}"]`) ||
+                 document.getElementById("pick-name-input");
+    if (!name.value) name.value = PICK.selected.split("/").pop().toLowerCase()
+      .replace(/[^a-z0-9_-]+/g,"-").replace(/^-+|-+$/g,"") || "media";
+  }
+}
+async function addShare(prefix){
+  const path = (document.getElementById("pick-path-input").value || "").trim();
+  const name = (document.getElementById("pick-name-input").value || "").trim();
+  const findingBox = document.getElementById(prefix === "setup" ? "setup-finding" : "shares-finding");
+  findingBox.innerHTML = "";
+  const r = await mut("/api/web/roots", {name, path});
+  if (!r.ok){
+    findingBox.innerHTML = `<div class="finding"><span class="lvl">FAIL</span>
+      <span class="msg">${esc((r.data && r.data.error) || "could not add the share")}</span></div>`;
+    return;
+  }
+  document.getElementById("pick-name-input").value = "";
+  const {data: st} = await api("/api/web/state"); if (st) STATE = st;
+  if (!r.data.readable){
+    // render the doctor's own finding for this root, verbatim
+    await loadDoctor(true);
+    const row = DOCTOR.rows.find(x => x.level === "FAIL" && x.message.includes(name));
+    findingBox.innerHTML = `<div class="finding">
+      <span class="lvl">FAIL</span><span class="msg">${esc(row ? row.message : "share not readable by the service user")}</span>
+      ${row && row.fix ? `<div class="codeline">fix: ${esc(row.fix)}</div>` : ""}
+      <div class="note">the share is saved either way — Seinn just can't read it yet</div>
+      <button class="btn secondary inline" style="margin-top:12px" onclick="loadDoctor(true)">Re-check</button>
+    </div>`;
+  }
+  if (prefix === "setup") renderSetupShares(); else renderShares();
+}
+
+/* ============ while-you're-here card ============ */
+function whileHereHTML(){
+  return `<p class="card-h">While you're here</p>
+    <div class="tog-row"><div><div class="lbl">Port</div>
+      <div class="sub mono">${STATE.port}</div></div></div>
+    <div class="tog-row"><div><div class="lbl">Thumbnails</div>
+      <div class="sub">Generated on the server, cached; instant off-toggle.</div></div>
+      <button class="tog ${STATE.thumbs_enabled ? "on":""}" role="switch"
+        aria-checked="${STATE.thumbs_enabled}" aria-label="Thumbnails"
+        onclick="toggleCfg('thumbs_enabled', this)"></button></div>
+    <div class="tog-row"><div><div class="lbl">Allow delete from the couch</div>
+      <div class="sub">Requires write permission on shares and an auth token — both are
+      checked, not assumed.</div></div>
+      <button class="tog ${STATE.delete_enabled ? "on":""}" role="switch"
+        aria-checked="${STATE.delete_enabled}" aria-label="Allow delete"
+        onclick="toggleCfg('delete_enabled', this)"></button></div>`;
+}
+async function toggleCfg(key, el){
+  const target = !el.classList.contains("on");
+  const r = await mut("/api/web/config", {[key]: target});
+  if (r.ok){ el.classList.toggle("on", target); el.setAttribute("aria-checked", target);
+             STATE[key] = target; }
+}
+
+/* ============ setup ============ */
+let setupStep = 1;
+function setupGo(n){
+  setupStep = n;
+  show("setup");
+  const names = {1:"Welcome", 2:"Shares", 3:"Connect the apps"};
+  $("setup-steps").textContent = `Setup · ${n} of 3 — ${names[n]}`;
+  for (const i of [1,2,3]) $("setup-"+i).classList.toggle("hidden", i !== n);
+  if (n === 1) $("setup-port").textContent = STATE.port;
+  if (n === 2){
+    $("picker").innerHTML = pickerHTML("setup");
+    $("while-here").innerHTML = whileHereHTML();
+    browse("setup", "/");
+    renderSetupShares();
+  }
+  if (n === 3) renderConnect($("setup-connect"), 300);
+}
+function renderSetupShares(){
+  $("setup-share-list").innerHTML = STATE.roots.length === 0
+    ? `<div class="act-row"><span class="e">nothing yet</span></div>`
+    : STATE.roots.map(r => `<div class="share-row"><div>
+        <div class="share-name">${esc(r.name)}</div>
+        <div class="share-path">${esc(r.path)}</div></div></div>`).join("");
+  $("setup-continue").disabled = STATE.roots.length === 0;
+}
+function finishSetup(){ location.hash = "status"; show("dash"); }
+
+/* ============ connect ============ */
+let TOKEN = null;
+async function connectPayload(){
+  if (TOKEN === null){
+    const r = await api("/api/web/token");
+    TOKEN = r.ok ? r.data.token : "";
+  }
+  return `seinn://connect?server=${encodeURIComponent("http://" + location.host)}&token=${encodeURIComponent(TOKEN)}`;
+}
+async function drawConnectQR(canvasId, px){
+  const payload = await connectPayload();
+  const c = $(canvasId);
+  if (c) drawQR(c, payload, px);
+}
+async function renderConnect(container, qrPx){
+  await connectPayload();
+  container.innerHTML = `
+    <div class="qr-tile"><canvas id="qr-big" width="${qrPx}" height="${qrPx}"></canvas></div>
+    <div class="connect-col">
+      <h2>Open Seinn on your iPhone and scan</h2>
+      <p class="expl">The phone is the key: it holds your credential behind Face&nbsp;ID and
+      endorses each television. The server only ever hands out sessions.</p>
+      <div class="card small">
+        <p class="card-h">Or type the token</p>
+        <div class="token-line">${esc(TOKEN || "no token configured — reads are open")}</div>
+      </div>
+      <p style="font-size:13px;color:var(--dim);margin:0">Reads and playback work without
+      the token; progress-saving and delete need it. Enter it once, when adding this server.</p>
+    </div>`;
+  drawConnectQR("qr-big", qrPx);
+}
+
+/* ============ shares page ============ */
+let confirmRemove = null;
+async function renderShares(){
+  const {data: st} = await api("/api/web/state");
+  if (st){ STATE = st; }
+  await loadDoctor();
+  const failRoots = new Set();
+  if (DOCTOR) for (const r of DOCTOR.rows)
+    if (r.level === "FAIL" && r.message.startsWith("root "))
+      failRoots.add(r.message.split(" ")[1].replace(":",""));
+  $("shares-list").innerHTML = STATE.roots.length === 0 ? emptyShares() :
+    STATE.roots.map(r => `
+    <div class="share-row">
+      <div>
+        <div class="share-name">${esc(r.name)}${failRoots.has(r.name) ? '<i class="warn-dot"></i>' : ''}</div>
+        <div class="share-path">${esc(r.path)}</div>
+      </div>
+      <div class="share-facts">${failRoots.has(r.name)
+        ? '<span class="orange">not readable</span>'
+        : `${r.entry_count ?? "—"} files · ${fmtBytes(r.free_bytes)} free`}</div>
+      ${confirmRemove === r.name
+        ? `<button class="btn destructive inline" data-really-remove="${esc(r.name)}">Really remove?</button>
+           <button class="btn secondary inline" data-keep>Keep</button>`
+        : `<button class="btn destructive inline" data-ask-remove="${esc(r.name)}">Remove</button>`}
+    </div>`).join("");
+  $("shares-picker").innerHTML = pickerHTML("shares");
+  $("shares-while-here").innerHTML = whileHereHTML();
+  browse("shares", PICK.path || "/");
+}
+async function removeShare(name){
+  confirmRemove = null;
+  const r = await mut("/api/web/roots/delete", {name});
+  if (!r.ok && r.data){
+    $("shares-finding").innerHTML = `<div class="finding"><span class="lvl">FAIL</span>
+      <span class="msg">${esc(r.data.error)}</span></div>`;
+  }
+  const {data: st} = await api("/api/web/state"); if (st) STATE = st;
+  renderShares();
+}
+
+/* ============ convert ============ */
+let convertPoll = null;
+function renderConvert(){
+  const sel = $("convert-root");
+  sel.innerHTML = STATE.roots.map(r => `<option value="${esc(r.name)}">${esc(r.name)}</option>`).join("");
+  pollConvert();
+  if (!convertPoll) convertPoll = setInterval(pollConvert, 2000);
+}
+async function runCensus(){
+  const root = $("convert-root").value;
+  await mut("/api/web/convert/census", {root});
+  pollConvert();
+}
+async function startConvert(){
+  await mut("/api/web/convert/start", {});
+  pollConvert();
+}
+async function stopConvert(){
+  await mut("/api/web/convert/stop", {});
+  pollConvert();
+}
+async function pollConvert(){
+  if (currentView !== "convert"){ clearInterval(convertPoll); convertPoll = null; return; }
+  const {data: c} = await api("/api/web/convert/status");
+  if (!c) return;
+  const body = $("convert-body");
+  $("convert-title").textContent = "Convert" + (c.root ? " · " + c.root : "");
+  $("convert-meta").textContent = "";
+  $("census-btn").disabled = (c.state === "census" || c.state === "running");
+  if (c.error){
+    body.innerHTML = `<div class="finding"><span class="lvl">FAIL</span>
+      <span class="msg">${esc(c.error)}</span></div>`;
+    return;
+  }
+  if (c.state === "idle" && !c.census){
+    body.innerHTML = `<div class="card state-card">
+      <h3>Probe first, convert second</h3>
+      <p>The census reads every video with ffprobe and reports exactly what it would
+      change — nothing is touched until you say convert.</p></div>`;
+    return;
+  }
+  if (c.state === "census"){
+    body.innerHTML = `<div class="card"><div class="prog-head">
+      <span class="state">CENSUS RUNNING</span>
+      <span class="nums mono">${c.census_done.toLocaleString()} files probed</span></div>
+      <div class="bar"><i style="width:50%"></i></div></div>`;
+    return;
+  }
+  if (c.state === "running" && c.run){
+    const r = c.run;
+    const pct = r.total ? Math.round(100*r.done/r.total) : 0;
+    body.innerHTML = `<div class="card">
+      <div class="prog-head"><span class="state">Running — safe to close this tab</span>
+        <span class="nums">${r.done.toLocaleString()} / ${r.total.toLocaleString()} · ${esc(r.lane)}</span></div>
+      <div class="bar"><i style="width:${pct}%"></i></div>
+      <div class="prog-foot">
+        <span>${r.current ? "now: " + esc(r.current) + " · " + esc(r.plan || "") : "…"}</span>
+        ${r.failed ? `<span style="color:var(--warn)">${r.failed} failed</span>` : ""}
+        <button class="btn destructive inline stop" onclick="stopConvert()">Stop after current file</button>
+      </div></div>`;
+    return;
+  }
+  if (c.census){
+    const cs = c.census;
+    $("convert-meta").textContent =
+      `census: ${(cs.probed + cs.cached).toLocaleString()} files probed, ${cs.cached.toLocaleString()} cached · lane: ${cs.lane} (est. ${cs.lane_factor}× realtime)`;
+    const dots = {optimal:"green", "needs-remux":"paper", "needs-transcode":"orange"};
+    const rows = cs.buckets.map(b => `<tr>
+      <td><span class="vdot ${dots[b.name] || "hollow"}"></span>${esc(b.name)}</td>
+      <td class="num">${b.count.toLocaleString()}</td>
+      <td class="num">${fmtBytes(b.bytes)}</td>
+      <td class="num">${b.est_seconds != null ? fmtEta(b.est_seconds) : "—"}</td>
+      <td>${esc(b.note || "")}</td></tr>`).join("");
+    body.innerHTML = `<div class="card" style="overflow-x:auto">
+      <table class="census-grid"><thead><tr>
+        <th>verdict</th><th style="text-align:right">files</th>
+        <th style="text-align:right">size</th><th style="text-align:right">est. time</th><th>note</th>
+      </tr></thead><tbody>${rows}</tbody></table>
+      <p class="caveat">${esc(cs.caveat)} Originals are never touched — converts write beside
+      them, then swap.</p>
+      <div style="display:flex;gap:12px;margin-top:18px;flex-wrap:wrap">
+        <button class="btn primary" ${cs.convertible ? "" : "disabled"} onclick="startConvert()">
+          Convert ${cs.convertible.toLocaleString()} file${cs.convertible === 1 ? "" : "s"}${cs.est_total_seconds ? " · " + fmtEta(cs.est_total_seconds) : ""}</button>
+        <button class="btn secondary" onclick="runCensus()">Re-run census</button>
+      </div></div>`;
+  }
+}
+
+boot();
+</script>
+</body>
+</html>

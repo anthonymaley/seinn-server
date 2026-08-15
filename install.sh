@@ -550,6 +550,8 @@ run cp "$SCRIPT_DIR/seinn_convert.py" "$PREFIX/seinn_convert.py"
 run chown "$INSTALL_USER" "$PREFIX/seinn_convert.py"
 run cp "$SCRIPT_DIR/seinn_tui.py" "$PREFIX/seinn_tui.py"
 run chown "$INSTALL_USER" "$PREFIX/seinn_tui.py"
+run cp "$SCRIPT_DIR/seinn_web.html" "$PREFIX/seinn_web.html"
+run chown "$INSTALL_USER" "$PREFIX/seinn_web.html"
 
 # ---- 4. config — create only if absent, NEVER overwrite -----------------
 CONFIG_PATH="$PREFIX/seinn-agent.toml"
@@ -849,6 +851,33 @@ Token handoff:
   and delete require it.
 
 EOF
+
+# The last mile: the agent mints a single-use claim code at startup and
+# writes it beside the config — the printed URL below is one click from
+# this terminal to a claimed browser dashboard. Best-effort: on a
+# --no-service install the agent hasn't run yet, so no code exists.
+CLAIM_CODE=""
+for _ in 1 2 3 4 5 6; do
+    if [ -f "$PREFIX/claim-code" ]; then
+        CLAIM_CODE="$(cat "$PREFIX/claim-code" 2>/dev/null || true)"
+        [ -n "$CLAIM_CODE" ] && break
+    fi
+    sleep 0.5
+done
+if [ -n "$CLAIM_CODE" ]; then
+    cat <<EOF
+Manage it in your browser:
+  http://${SERVER_IP}:${PORT}/?code=${CLAIM_CODE}
+
+EOF
+else
+    cat <<EOF
+Manage it in your browser (the claim code prints in the agent's log at
+startup, and lands in ${PREFIX}/claim-code):
+  http://${SERVER_IP}:${PORT}/
+
+EOF
+fi
 
 if [ "$NO_SERVICE" -eq 1 ]; then
     cat <<EOF

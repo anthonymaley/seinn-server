@@ -22,7 +22,7 @@ RUN apt-get update \
     && mkdir -p /config /media \
     && chown seinn:seinn /config
 
-COPY seinn_agent.py seinn_convert.py /app/
+COPY seinn_agent.py seinn_convert.py seinn_web.html /app/
 # Weefish-only selftest — inert without a mounted libkrutho.so and the SDK
 # fixture corpus; shipped so the image is the complete server-component view.
 COPY tools/krutho_selftest.py /app/tools/

@@ -65,12 +65,14 @@ import hmac
 import json
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tomllib
@@ -80,7 +82,7 @@ from typing import NamedTuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 # bump on any behavior change; --version and the startup banner print it
-AGENT_VERSION = "1.4.0"
+AGENT_VERSION = "1.5.0"
 
 CHUNK = 1024 * 1024
 STAT_BATCH = 400
@@ -767,6 +769,8 @@ def load_config(argv):
            # once at pairing time).
            "enrol_ttl": ENROL_TTL_DEFAULT,
            "device_session_ttl": DEVICE_SESSION_TTL_DEFAULT}
+    cfg["config_path"] = args.config          # None on a pure-flags run;
+    cfg["service_name"] = args.service_name   # both feed /api/web/doctor
     cfg["test_accept_nonce"] = args.test_accept_nonce
     cfg["krutho_audience"] = args.test_accept_audience or "seinn-agent"
     cfg["test_treat_bridging_as_credential"] = args.test_treat_bridging_as_credential
@@ -1338,6 +1342,329 @@ def linux_btimes(paths):
             except ValueError:
                 out[path] = None
     return out
+
+
+# ---- web management surface (docs/design/SERVER-WEB.md) --------------------
+#
+# The browser is the management surface: claim -> session cookie -> setup /
+# dashboard / shares / convert, all rendered by seinn_web.html (served at /)
+# against the /api/web/* endpoints below. Reads stay open like the API's
+# reads; every mutation needs the claim session cookie AND the CSRF header.
+# Doctor and census strings pass through verbatim — there is exactly one
+# copy of every finding, fix and caveat, and it lives in Python.
+
+WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seinn_web.html")
+WEB_COOKIE = "seinn_web"
+WEB_CLAIM_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"   # no 0/O/1/I/L
+WEB_CLAIM_MAX_FAILS = 5
+
+WEB = {
+    "start": time.time(),
+    "claim_code": None,     # minted at startup; None once consumed/locked
+    "claim_fails": 0,
+    "events": [],           # ring of {"t": epoch, "event": str}, newest last
+}
+WEB_EVENTS_MAX = 40
+_web_lock = threading.Lock()
+
+
+def web_event(text):
+    """Ring buffer feeding the dashboard's RECENT ACTIVITY card — notable
+    events (deletes, enrolments, claims), never raw request logs."""
+    with _web_lock:
+        WEB["events"].append({"t": int(time.time()), "event": text})
+        del WEB["events"][:-WEB_EVENTS_MAX]
+
+
+def web_mint_claim_code(cfg):
+    """One code per process, single-use — 'restart the agent to mint a new
+    one' is the recovery path the claim screen states. Printed to the log
+    and written beside the config (best-effort, 0600)."""
+    code = "-".join("".join(secrets.choice(WEB_CLAIM_ALPHABET) for _ in range(4))
+                    for _ in range(2))
+    WEB["claim_code"] = code
+    locations = ["this log line"]
+    if cfg["config_path"]:
+        path = os.path.join(os.path.dirname(os.path.abspath(cfg["config_path"])),
+                            "claim-code")
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(code + "\n")
+            locations.append(path)
+        except OSError:
+            pass
+    host = socket.gethostname().split(".")[0] or "<this-host>"
+    print(f"web: manage this server at http://{host}:{cfg['port']}/?code={code} "
+          f"(claim code {code}; also in {' and '.join(locations)})", flush=True)
+
+
+def web_csrf_for(cfg, token):
+    """CSRF token derived from the session token — stateless server-side,
+    returned once at claim, required in X-Seinn-CSRF on every mutation."""
+    return hmac.new(cfg["session_secret"], b"csrf:" + token.encode(),
+                    hashlib.sha256).hexdigest()
+
+
+# ---- safe config writer (ported from the parked TUI, which remains the
+# only other historical user; the schema is exactly: known scalars, then
+# unknown scalars, then [roots] LAST — the below-[roots] trap, bit twice) --
+
+class ConfigNotSerializable(Exception):
+    pass
+
+
+_KNOWN_KEY_ORDER = [
+    "port", "bind", "delete_enabled", "hide_dotfiles", "thumbs_enabled",
+    "cache_dir", "auth_token", "state_db",
+]
+
+_ROOT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _encode_toml_string(s):
+    out = ['"']
+    for ch in s:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ord(ch) < 0x20:
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
+def _encode_toml_value(key, value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return _encode_toml_string(value)
+    raise ConfigNotSerializable(key)
+
+
+def config_load_raw(path):
+    with open(path, "rb") as f:
+        raw = f.read()
+    return tomllib.loads(raw.decode("utf-8")), raw.decode("utf-8")
+
+
+def config_serialize(data):
+    top = {k: v for k, v in data.items() if k != "roots"}
+    roots = data.get("roots", {})
+    unknown = sorted(k for k in top if k not in _KNOWN_KEY_ORDER)
+    order = [k for k in _KNOWN_KEY_ORDER if k in top] + unknown
+    lines = []
+    for key in order:
+        encoded = _encode_toml_value(key, top[key])
+        if key == "auth_token":
+            lines.append("")
+            lines.append("# Required on state-changing routes (DELETE, progress-save). Reads stay open")
+            lines.append("# on the LAN. Give it to the app once when adding this server.")
+        if key == "state_db":
+            lines.append("")
+            lines.append("# Watched-state database (sqlite, created on first write).")
+        lines.append(f"{key} = {encoded}")
+    lines.append("")
+    lines.append("# EVERY top-level key must sit ABOVE [roots]. Appended below, TOML reads it as")
+    lines.append("# a share — which is how the auth token briefly became a publicly-listed root.")
+    lines.append("[roots]")
+    for name, path in roots.items():
+        if not _ROOT_NAME_RE.match(name):
+            raise ConfigNotSerializable(f"roots.{name} (invalid root name)")
+        if not isinstance(path, str) or not os.path.isabs(path):
+            raise ConfigNotSerializable(f"roots.{name} (not an absolute path string)")
+        lines.append(f"{name} = {_encode_toml_string(path)}")
+    return "\n".join(lines) + "\n"
+
+
+def config_save(path, data):
+    """Atomic, permission-preserving, verified write; a failed write leaves
+    the original untouched. Returns the .bak path or None (fresh file)."""
+    serialized = config_serialize(data)
+    dirpath = os.path.dirname(os.path.abspath(path)) or "."
+    exists = os.path.exists(path)
+    bak_path = None
+    if exists:
+        st = os.stat(path)
+        mode = st.st_mode & 0o777
+        uid, gid = st.st_uid, st.st_gid
+        with open(path, "rb") as f:
+            prior_raw = f.read()
+        bak_path = path + ".bak"
+        with open(bak_path, "wb") as f:
+            f.write(prior_raw)
+        os.chmod(bak_path, mode)
+    else:
+        mode = 0o600
+        uid, gid = os.getuid(), os.getgid()
+    fd, tmp = tempfile.mkstemp(dir=dirpath, prefix=".seinn-agent-toml-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(serialized.encode("utf-8"))
+        os.chmod(tmp, mode)
+        if os.getuid() == 0:
+            os.chown(tmp, uid, gid)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    with open(path, "rb") as f:
+        verify = tomllib.loads(f.read().decode("utf-8"))
+    if verify.get("roots", {}) != data.get("roots", {}):
+        raise RuntimeError(f"config_save verify failed for {path}")
+    return bak_path
+
+
+# ---- convert-as-API (engine: seinn_convert.py beside this file) -----------
+#
+# The run belongs to the agent, not the page — the browser polls
+# /api/web/convert/status and rejoins after a reload. One operation at a
+# time; "stop" means stop-after-current-file (the engine's own semantics).
+
+CONVERT = {
+    "state": "idle",        # idle | census | ready | running
+    "root": None,
+    "error": None,
+    "census": None,         # census_data() dict + counts, verbatim
+    "census_done": 0,
+    "census_total": 0,
+    "run": None,            # {total, done, failed, current, lane, started}
+}
+_convert_lock = threading.Lock()
+_convert_stop = None        # StopController while running
+
+
+def _load_convert_module():
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "seinn_convert.py")
+    spec = importlib.util.spec_from_file_location("seinn_convert", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_convert_mod = None
+
+
+def convert_module():
+    global _convert_mod
+    if _convert_mod is None:
+        _convert_mod = _load_convert_module()
+    return _convert_mod
+
+
+def _convert_pipeline(sc, root_path, on_classified=None):
+    """discover + classify (cache-backed) — the shared front half of census
+    and apply, exactly main()'s order. Returns (entries, store, probed,
+    cached, vaapi_ok)."""
+    min_age_seconds = 30 * 60   # engine default, no force from the web
+    entries, _stale = sc.discover(root_path, min_age_seconds, False)
+    store = sc.StateStore(root_path)
+    probed = cached = 0
+    for e in entries:
+        if e.verdict is not None:
+            continue
+        if sc.classify_with_cache(e, store, False):
+            probed += 1
+        else:
+            cached += 1
+        if on_classified:
+            on_classified(probed + cached)
+    store.flush_now()
+    vaapi_ok, _reason = sc.vaapi_available()
+    return entries, store, probed, cached, vaapi_ok
+
+
+def _convert_census_thread(cfg, root_name):
+    sc = convert_module()
+    root_path = cfg["roots"][root_name]
+    try:
+        def tick(done):
+            with _convert_lock:
+                CONVERT["census_done"] = done
+
+        with _convert_lock:
+            CONVERT["census_total"] = 0
+        entries, store, probed, cached, vaapi_ok = _convert_pipeline(
+            sc, root_path, on_classified=tick)
+        remux_audio = sum(1 for e in entries if e.plan == "remux-audio")
+        data = sc.census_data(entries, root_path, 30, probed, cached,
+                              vaapi_ok, remux_audio)
+        convertible = [e for e in entries
+                       if e.plan in ("remux", "remux-audio", "transcode")]
+        est = sum(b["est_seconds"] or 0 for b in data["buckets"]
+                  if b["name"] in ("needs-remux", "needs-transcode"))
+        with _convert_lock:
+            CONVERT["census"] = {**data, "convertible": len(convertible),
+                                 "est_total_seconds": est,
+                                 "vaapi": vaapi_ok}
+            CONVERT["state"] = "ready"
+    except Exception as exc:   # a census failure is a finding, not a crash
+        with _convert_lock:
+            CONVERT["state"] = "idle"
+            CONVERT["error"] = f"census failed: {exc}"
+
+
+def _convert_apply_thread(cfg, root_name):
+    global _convert_stop
+    sc = convert_module()
+    root_path = cfg["roots"][root_name]
+    try:
+        entries, store, _p, _c, vaapi_ok = _convert_pipeline(sc, root_path)
+        convertible = [e for e in entries
+                       if e.plan in ("remux", "remux-audio", "transcode")]
+        stop_ctrl = sc.StopController()
+        with _convert_lock:
+            _convert_stop = stop_ctrl
+            CONVERT["run"] = {"total": len(convertible), "done": 0,
+                              "failed": 0, "current": None, "plan": None,
+                              "lane": "vaapi" if vaapi_ok else "x264",
+                              "started": int(time.time())}
+            CONVERT["state"] = "running"
+
+        def progress(kind, entry):
+            with _convert_lock:
+                run = CONVERT["run"]
+                if run is None:
+                    return
+                if kind == "file-start":
+                    run["current"] = entry.relpath
+                    run["plan"] = entry.plan
+                elif kind == "file-done":
+                    run["done"] += 1
+                    run["current"] = None
+                    if entry.result and entry.result.startswith("FAILED"):
+                        run["failed"] += 1
+
+        sc.apply_all(convertible, store, 2, vaapi_ok, stop_ctrl,
+                     progress=progress)
+        store.flush_now()
+        web_event(f"convert finished on {root_name}: "
+                  f"{CONVERT['run']['done']}/{CONVERT['run']['total']} done, "
+                  f"{CONVERT['run']['failed']} failed")
+    except Exception as exc:
+        with _convert_lock:
+            CONVERT["error"] = f"convert failed: {exc}"
+    finally:
+        with _convert_lock:
+            _convert_stop = None
+            CONVERT["state"] = "idle"
+            CONVERT["census"] = None   # stale after an apply — re-census
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2018,10 +2345,380 @@ class Handler(BaseHTTPRequestHandler):
                   f"{elapsed:.1f}s = {mbps:.0f} Mbps  {os.path.basename(full)}",
                   flush=True)
 
+    # ---- web management surface -------------------------------------
+
+    def web_session(self):
+        """The claim session, from the HttpOnly cookie. Returns the raw
+        token when valid (needed to derive the CSRF expectation), None
+        otherwise."""
+        header = self.headers.get("Cookie", "")
+        for part in header.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == WEB_COOKIE and value:
+                if verify_session_token(self.cfg, value) == "web":
+                    return value
+        return None
+
+    def web_write_authorized(self):
+        """Every mutation: claim session cookie AND the CSRF header derived
+        from it. The cookie alone must never authorize a write — that is
+        the whole CSRF point."""
+        token = self.web_session()
+        if token is None:
+            return False
+        presented = self.headers.get("X-Seinn-CSRF", "")
+        return hmac.compare_digest(presented, web_csrf_for(self.cfg, token))
+
+    def handle_web_index(self):
+        try:
+            with open(WEB_HTML, "rb") as f:
+                body = f.read()
+        except OSError:
+            return self.send_error_json(HTTPStatus.NOT_FOUND,
+                                        "seinn_web.html not found beside the agent")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def web_roots_summary(self):
+        roots = []
+        for n, p in sorted(self.cfg["roots"].items()):
+            try:
+                free_bytes = shutil.disk_usage(p).free
+            except OSError:
+                free_bytes = None
+            roots.append({"name": n, "path": p, "free_bytes": free_bytes,
+                          "entry_count": self.child_count(p)})
+        return roots
+
+    def handle_web_state(self):
+        token = self.web_session()
+        expires = None
+        if token:
+            decoded = _session_payload_decode(token.partition(".")[0])
+            if decoded:
+                expires = decoded[1]
+        self.send_json({
+            "claimed": token is not None,
+            "claim_available": WEB["claim_code"] is not None,
+            "session_expires": expires,
+            "agent_version": AGENT_VERSION,
+            "host": socket.gethostname().split(".")[0],
+            "uptime_s": int(time.time() - WEB["start"]),
+            "port": self.cfg["port"],
+            "delete_enabled": self.cfg["delete_enabled"],
+            "thumbs_enabled": self.cfg["thumbs_enabled"],
+            "ffmpeg": HAVE_FFMPEG,
+            "krutho": self.cfg["krutho"] is not None,
+            "auth_token": bool(self.cfg["auth_token"]),
+            "roots": self.web_roots_summary(),
+        }, no_store=True)
+
+    def handle_web_doctor(self):
+        """CheckResult rows verbatim + the verdict line exactly as
+        doctor_verdict prints it. The page renders these strings, it never
+        rewrites them."""
+        config_path = self.cfg["config_path"] or doctor_default_config_path()
+        results = list(doctor_checks(config_path, self.cfg["service_name"]))
+        self.send_json({
+            "ran_at": int(time.time()),
+            "rows": [{"level": r.level, "message": r.message, "fix": r.fix}
+                     for r in results],
+            "verdict": doctor_verdict(results),
+        }, no_store=True)
+
+    def handle_web_events(self):
+        with _web_lock:
+            events = list(WEB["events"])[-15:]
+        self.send_json({"events": events}, no_store=True)
+
+    def handle_web_fs(self, query):
+        """Server-side folder browse for the share picker. Session-gated:
+        this walks the host filesystem, which is a bigger read than the
+        media API's reads."""
+        if self.web_session() is None:
+            return self.send_error_json(HTTPStatus.UNAUTHORIZED, "claim required")
+        params = parse_qs(query)
+        path = os.path.abspath((params.get("path") or ["/"])[0])
+        if not os.path.isdir(path):
+            return self.send_error_json(HTTPStatus.NOT_FOUND, "not a directory")
+        dirs = []
+        try:
+            with os.scandir(path) as it:
+                for entry in it:
+                    if entry.name.startswith("."):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        subdirs = files = 0
+                        try:
+                            with os.scandir(entry.path) as sub:
+                                for s in sub:
+                                    if s.name.startswith("."):
+                                        continue
+                                    if s.is_dir(follow_symlinks=False):
+                                        subdirs += 1
+                                    else:
+                                        files += 1
+                                    if subdirs + files >= 10000:
+                                        break
+                        except OSError:
+                            subdirs = files = -1   # unreadable: a finding, not a crash
+                        dirs.append({"name": entry.name, "dirs": subdirs,
+                                     "files": files})
+        except OSError as exc:
+            return self.send_error_json(HTTPStatus.FORBIDDEN, str(exc))
+        dirs.sort(key=lambda d: d["name"].lower())
+        parent = os.path.dirname(path) if path != "/" else None
+        self.send_json({"path": path, "parent": parent, "dirs": dirs},
+                       no_store=True)
+
+    def handle_web_claim(self):
+        try:
+            data = json.loads(self.body or b"{}")
+        except json.JSONDecodeError:
+            return self.send_error_json(HTTPStatus.BAD_REQUEST, "bad json")
+        code = str(data.get("code", "")).strip().upper()
+        with _web_lock:
+            expected = WEB["claim_code"]
+            if expected is None or WEB["claim_fails"] >= WEB_CLAIM_MAX_FAILS:
+                return self.send_error_json(
+                    HTTPStatus.FORBIDDEN,
+                    "code not recognised — codes are single-use; restart the "
+                    "agent to mint a new one")
+            if not hmac.compare_digest(code, expected):
+                WEB["claim_fails"] += 1
+                time.sleep(0.5)   # cheap rate limit; lockout above at 5
+                return self.send_error_json(
+                    HTTPStatus.UNAUTHORIZED,
+                    "code not recognised — codes are single-use; restart the "
+                    "agent to mint a new one")
+            WEB["claim_code"] = None   # single-use
+        token, expires = mint_session_token(self.cfg, "web")
+        web_event("server claimed from this browser")
+        body = json.dumps({"csrf": web_csrf_for(self.cfg, token),
+                           "expires": expires}).encode()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        ttl = max(0, expires - int(time.time()))
+        self.send_header("Set-Cookie",
+                         f"{WEB_COOKIE}={token}; Path=/; HttpOnly; "
+                         f"SameSite=Lax; Max-Age={ttl}")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def web_config_write(self, mutate):
+        """Load-mutate-save around the deployed TOML with the ported safe
+        writer; then reload the live cfg fields the agent serves from. The
+        config file and this path are the only two writers."""
+        path = self.cfg["config_path"]
+        if not path:
+            return None, "agent runs on flags only — no config file to edit"
+        try:
+            data, _ = config_load_raw(path)
+        except FileNotFoundError:
+            data = {}
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            return None, f"config unreadable: {exc}"
+        data.setdefault("roots", {})
+        error = mutate(data)
+        if error:
+            return None, error
+        try:
+            config_save(path, data)
+        except (ConfigNotSerializable, OSError, RuntimeError) as exc:
+            return None, f"config write failed: {exc}"
+        return data, None
+
+    def handle_web_roots_add(self):
+        if not self.web_write_authorized():
+            return self.send_error_json(HTTPStatus.UNAUTHORIZED, "claim required")
+        try:
+            data = json.loads(self.body or b"{}")
+        except json.JSONDecodeError:
+            return self.send_error_json(HTTPStatus.BAD_REQUEST, "bad json")
+        name = str(data.get("name", "")).strip()
+        path = str(data.get("path", "")).strip()
+        if not _ROOT_NAME_RE.match(name):
+            return self.send_error_json(HTTPStatus.BAD_REQUEST,
+                                        "share name: letters, digits, - and _ only")
+        if not os.path.isabs(path) or not os.path.isdir(path):
+            return self.send_error_json(HTTPStatus.BAD_REQUEST,
+                                        "path must be an absolute, existing directory")
+        real = os.path.realpath(path)
+
+        def mutate(cfg_data):
+            cfg_data["roots"][name] = real
+            return None
+
+        _, err = self.web_config_write(mutate)
+        if err:
+            return self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, err)
+        new_roots = dict(self.cfg["roots"])
+        new_roots[name] = real
+        self.cfg["roots"] = new_roots   # live, no restart needed
+        # The share is saved either way — readability is the doctor's
+        # finding to report, not a reason to refuse the add.
+        readable = os.access(real, os.R_OK | os.X_OK)
+        web_event(f"share added: {name} = {real}")
+        self.send_json({"added": name, "path": real, "readable": readable})
+
+    def handle_web_roots_delete(self):
+        if not self.web_write_authorized():
+            return self.send_error_json(HTTPStatus.UNAUTHORIZED, "claim required")
+        try:
+            data = json.loads(self.body or b"{}")
+        except json.JSONDecodeError:
+            return self.send_error_json(HTTPStatus.BAD_REQUEST, "bad json")
+        name = str(data.get("name", ""))
+        if name not in self.cfg["roots"]:
+            return self.send_error_json(HTTPStatus.NOT_FOUND, "no such share")
+
+        def mutate(cfg_data):
+            cfg_data["roots"].pop(name, None)
+            if not cfg_data["roots"]:
+                return ("refusing to remove the last share — the agent will "
+                        "not start with zero roots; add another first")
+            return None
+
+        _, err = self.web_config_write(mutate)
+        if err:
+            status = (HTTPStatus.CONFLICT if err.startswith("refusing")
+                      else HTTPStatus.INTERNAL_SERVER_ERROR)
+            return self.send_error_json(status, err)
+        new_roots = dict(self.cfg["roots"])
+        new_roots.pop(name, None)
+        self.cfg["roots"] = new_roots
+        web_event(f"share removed: {name}")
+        self.send_json({"removed": name})
+
+    def handle_web_config_patch(self):
+        if not self.web_write_authorized():
+            return self.send_error_json(HTTPStatus.UNAUTHORIZED, "claim required")
+        try:
+            data = json.loads(self.body or b"{}")
+        except json.JSONDecodeError:
+            return self.send_error_json(HTTPStatus.BAD_REQUEST, "bad json")
+        allowed = {"thumbs_enabled": bool, "delete_enabled": bool, "port": int}
+        changes = {}
+        for key, typ in allowed.items():
+            if key in data:
+                if not isinstance(data[key], typ) or isinstance(data[key], bool) and typ is int:
+                    return self.send_error_json(HTTPStatus.BAD_REQUEST,
+                                                f"{key}: wrong type")
+                changes[key] = data[key]
+        if not changes:
+            return self.send_error_json(HTTPStatus.BAD_REQUEST, "nothing to change")
+        if "port" in changes and not (1 <= changes["port"] <= 65535):
+            return self.send_error_json(HTTPStatus.BAD_REQUEST, "port out of range")
+
+        def mutate(cfg_data):
+            cfg_data.update(changes)
+            return None
+
+        _, err = self.web_config_write(mutate)
+        if err:
+            return self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, err)
+        restart_required = False
+        for key, value in changes.items():
+            if key == "port":
+                restart_required = value != self.cfg["port"]
+            else:
+                self.cfg[key] = value   # live
+        web_event("settings changed: " + ", ".join(sorted(changes)))
+        self.send_json({"changed": sorted(changes),
+                        "restart_required": restart_required})
+
+    def handle_web_restart(self):
+        if not self.web_write_authorized():
+            return self.send_error_json(HTTPStatus.UNAUTHORIZED, "claim required")
+        self.send_json({"restarting": True})
+        web_event("restart requested from the web surface")
+
+        def exec_self():
+            time.sleep(0.5)   # let the response flush
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
+        threading.Thread(target=exec_self, daemon=True).start()
+
+    def handle_web_convert_status(self):
+        with _convert_lock:
+            snap = {k: CONVERT[k] for k in
+                    ("state", "root", "error", "census", "census_done", "run")}
+        self.send_json(snap, no_store=True)
+
+    def handle_web_convert_census(self):
+        if not self.web_write_authorized():
+            return self.send_error_json(HTTPStatus.UNAUTHORIZED, "claim required")
+        try:
+            data = json.loads(self.body or b"{}")
+        except json.JSONDecodeError:
+            return self.send_error_json(HTTPStatus.BAD_REQUEST, "bad json")
+        root = str(data.get("root", ""))
+        if root not in self.cfg["roots"]:
+            return self.send_error_json(HTTPStatus.NOT_FOUND, "no such share")
+        with _convert_lock:
+            if CONVERT["state"] in ("census", "running"):
+                return self.send_error_json(HTTPStatus.CONFLICT,
+                                            f"busy: {CONVERT['state']}")
+            CONVERT.update({"state": "census", "root": root, "error": None,
+                            "census": None, "census_done": 0, "run": None})
+        threading.Thread(target=_convert_census_thread,
+                         args=(self.cfg, root), daemon=True).start()
+        self.send_json({"started": "census", "root": root})
+
+    def handle_web_convert_start(self):
+        if not self.web_write_authorized():
+            return self.send_error_json(HTTPStatus.UNAUTHORIZED, "claim required")
+        with _convert_lock:
+            if CONVERT["state"] != "ready" or not CONVERT["root"]:
+                return self.send_error_json(HTTPStatus.CONFLICT,
+                                            "run a census first")
+            root = CONVERT["root"]
+            CONVERT["error"] = None
+        web_event(f"convert started on {root}")
+        threading.Thread(target=_convert_apply_thread,
+                         args=(self.cfg, root), daemon=True).start()
+        self.send_json({"started": "convert", "root": root})
+
+    def handle_web_convert_stop(self):
+        if not self.web_write_authorized():
+            return self.send_error_json(HTTPStatus.UNAUTHORIZED, "claim required")
+        with _convert_lock:
+            if _convert_stop is None:
+                return self.send_error_json(HTTPStatus.CONFLICT, "nothing running")
+            _convert_stop.stop_event.set()   # stop after current file
+        web_event("convert stop requested (after current file)")
+        self.send_json({"stopping": True})
+
     # ---- verbs -------------------------------------------------------
 
     def do_GET(self):
         url = urlparse(self.path)
+        if url.path in ("/", "/index.html"):
+            return self.handle_web_index()
+        if url.path == "/api/web/state":
+            return self.handle_web_state()
+        if url.path == "/api/web/doctor":
+            return self.handle_web_doctor()
+        if url.path == "/api/web/events":
+            return self.handle_web_events()
+        if url.path == "/api/web/fs":
+            return self.handle_web_fs(url.query)
+        if url.path == "/api/web/convert/status":
+            return self.handle_web_convert_status()
+        if url.path == "/api/web/token":
+            # The Connect screen's QR + type-it card. Session-gated: the
+            # token authorizes writes, so only a claimed browser sees it.
+            if self.web_session() is None:
+                return self.send_error_json(HTTPStatus.UNAUTHORIZED,
+                                            "claim required")
+            return self.send_json({"token": self.cfg["auth_token"],
+                                   "port": self.cfg["port"]}, no_store=True)
         if url.path == "/api/roots":
             # name + path: the client shows the real path under each share name
             # so it's obvious what you're opening. free_bytes/entry_count are
@@ -2060,7 +2757,23 @@ class Handler(BaseHTTPRequestHandler):
         # return (auth, bad route) can't desynchronise the connection.
         self.body = self.read_body()
         path = urlparse(self.path).path
-        if path == "/api/progress":
+        if path == "/api/web/claim":
+            self.handle_web_claim()
+        elif path == "/api/web/roots":
+            self.handle_web_roots_add()
+        elif path == "/api/web/roots/delete":
+            self.handle_web_roots_delete()
+        elif path == "/api/web/config":
+            self.handle_web_config_patch()
+        elif path == "/api/web/restart":
+            self.handle_web_restart()
+        elif path == "/api/web/convert/census":
+            self.handle_web_convert_census()
+        elif path == "/api/web/convert/start":
+            self.handle_web_convert_start()
+        elif path == "/api/web/convert/stop":
+            self.handle_web_convert_stop()
+        elif path == "/api/progress":
             self.handle_post_progress()
         elif path == "/api/session":
             self.handle_post_session()
@@ -2092,6 +2805,7 @@ class Handler(BaseHTTPRequestHandler):
             shutil.rmtree(full)
         else:
             os.remove(full)
+        web_event(f"deleted from the couch: {root}/{rel}")
         self.send_json({"deleted": f"{root}/{rel}"})
 
 
@@ -2114,6 +2828,7 @@ def main():
     if cfg["delete_enabled"] and not cfg["auth_token"]:
         print("WARNING: delete is enabled with no auth_token — any client on "
               "this network can delete files served by this agent", flush=True)
+    web_mint_claim_code(cfg)
     server.serve_forever()
 
 
