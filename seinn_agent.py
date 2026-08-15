@@ -613,6 +613,39 @@ def probe_duration(full):
         return None
 
 
+# Share-wide stats (2026-08-15, user ask: the Home card should say what the
+# WHOLE share holds, not its top level). A 25k-file walk is too slow to run
+# per-request on rotational storage, so a background sweep keeps a cache and
+# /api/roots serves it — null until the first sweep lands, same contract as
+# durations.
+ROOTS_STATS = {}           # root name -> {"file_count": n, "content_bytes": b}
+_roots_stats_lock = threading.Lock()
+ROOTS_STATS_INTERVAL = 15 * 60
+
+
+def roots_stats_loop(cfg):
+    while True:
+        for name, root in cfg["roots"].items():
+            files = 0
+            total = 0
+            try:
+                for cur, dirs, fnames in os.walk(root):
+                    dirs[:] = [d for d in dirs if not d.startswith(".")]
+                    for f in fnames:
+                        if cfg["hide_dotfiles"] and f.startswith("."):
+                            continue
+                        files += 1
+                        try:
+                            total += os.stat(os.path.join(cur, f)).st_size
+                        except OSError:
+                            pass
+            except OSError:
+                continue
+            with _roots_stats_lock:
+                ROOTS_STATS[name] = {"file_count": files, "content_bytes": total}
+        time.sleep(ROOTS_STATS_INTERVAL)
+
+
 def duration_sweep_loop(cfg):
     """Keeps the durations table current so listings can carry per-file
     duration without a per-request ffprobe. Runs forever on a daemon thread;
@@ -2390,8 +2423,12 @@ class Handler(BaseHTTPRequestHandler):
                 free_bytes = shutil.disk_usage(p).free
             except OSError:
                 free_bytes = None
+            with _roots_stats_lock:
+                stats = ROOTS_STATS.get(n, {})
             roots.append({"name": n, "path": p, "free_bytes": free_bytes,
-                          "entry_count": self.child_count(p)})
+                          "entry_count": self.child_count(p),
+                          "file_count": stats.get("file_count"),
+                          "content_bytes": stats.get("content_bytes")})
         return roots
 
     def handle_web_state(self):
@@ -2732,8 +2769,12 @@ class Handler(BaseHTTPRequestHandler):
                     free_bytes = shutil.disk_usage(p).free
                 except OSError:
                     free_bytes = None
+                with _roots_stats_lock:
+                    stats = ROOTS_STATS.get(n, {})
                 roots.append({"name": n, "path": p, "free_bytes": free_bytes,
-                              "entry_count": self.child_count(p)})
+                              "entry_count": self.child_count(p),
+                              "file_count": stats.get("file_count"),
+                              "content_bytes": stats.get("content_bytes")})
             self.send_json({"roots": roots,
                             "agent_version": AGENT_VERSION,
                             "thumb_cache_bytes": self.thumb_cache_bytes()})
@@ -2815,6 +2856,7 @@ def main():
     server = ThreadingHTTPServer((cfg["bind"], cfg["port"]), Handler)
     server.daemon_threads = True
     threading.Thread(target=duration_sweep_loop, args=(cfg,), daemon=True).start()
+    threading.Thread(target=roots_stats_loop, args=(cfg,), daemon=True).start()
     roots = ", ".join(f"{n}={p}" for n, p in cfg["roots"].items())
     ffmpeg_status = "yes" if HAVE_FFMPEG else "MISSING (thumbs+durations off)"
     krutho_status = ("loaded" if cfg["krutho"] is not None
